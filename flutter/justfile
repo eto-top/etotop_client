@@ -1,0 +1,83 @@
+default: gen run
+
+API_DIR := "rust/src/api"
+CANARY  := "binding-rerun.sha256"
+
+gen +ARGS="":
+    flutter_rust_bridge_codegen generate {{ARGS}}
+    find {{API_DIR}} -type f -exec sha256sum {} + > {{CANARY}}
+    flutter pub get
+
+gen-web:
+    flutter_rust_bridge_codegen build-web
+    find {{API_DIR}} -type f -exec sha256sum {} + > {{CANARY}}
+    flutter pub get
+
+build-runner:
+    dart run build_runner build --delete-conflicting-outputs
+
+build TARGET="linux" +ARGS="": maybe-gen
+    #!/bin/sh
+    BUILD_COMMIT=$(just get-build-commit)
+    BUILD_VERSION=$(just get-build-version)
+    BUNDLE_FIRMWARE=1 flutter build {{TARGET}} --dart-define=BUILD_COMMIT="$BUILD_COMMIT" --dart-define=BUILD_VERSION="$BUILD_VERSION" {{ARGS}}
+
+run +ARGS="": maybe-gen
+    #!/bin/sh
+    set -e
+    BUILD_COMMIT=$(just get-build-commit)
+    BUILD_VERSION=$(just get-build-version)
+    BUNDLE_FIRMWARE=1 flutter run --dart-define=BUILD_COMMIT="$BUILD_COMMIT" --dart-define=BUILD_VERSION="$BUILD_VERSION" {{ARGS}}
+
+run-web:
+    flutter run -d chrome --web-header=Cross-Origin-Opener-Policy=same-origin --web-header=Cross-Origin-Embedder-Policy=require-corp
+
+maybe-gen:
+    #!/bin/sh
+    if ! sha256sum --check {{CANARY}} >/dev/null 2>&1 ; then
+       echo "{{CANARY}} changed so re-running bindgen">&2;
+       just gen
+    fi
+    just build-runner
+
+flutter_rust_bridge_version:
+    #!/bin/sh
+    flutter_rust_bridge_version=$(cargo tree --prefix none  | sed -n 's/flutter_rust_bridge v//p')
+    echo $flutter_rust_bridge_version
+
+
+install-cargo-bins:
+    #!/bin/sh
+    flutter_rust_bridge_version=$(just flutter_rust_bridge_version)
+    if ! test "$flutter_rust_bridge_version"; then
+        echo "couldn't determine version for flutter_rust_bridge" >&2;
+        exit 1
+    fi
+    cargo install cargo-ndk@3.5.4 cargo-expand@1.0.95 "flutter_rust_bridge_codegen@$flutter_rust_bridge_version"
+
+get-build-commit:
+    #!/bin/sh
+    BUILD_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    if [ "$BUILD_COMMIT" != "unknown" ] && ! git diff-index --quiet HEAD --; then
+        BUILD_COMMIT="${BUILD_COMMIT}-modified"
+    fi
+    echo "$BUILD_COMMIT"
+
+get-build-version:
+    #!/bin/sh
+    BUILD_VERSION=$(git describe --tags --always 2>/dev/null || echo "unknown")
+    if [ "$BUILD_VERSION" != "unknown" ] && ! git diff-index --quiet HEAD --; then
+        BUILD_VERSION="${BUILD_VERSION}-modified"
+    fi
+    echo "$BUILD_VERSION"
+
+clean:
+    flutter clean
+    rm -rf ./lib/src/rust*
+    rm ./rust/src/frb_generated.rs
+    cd rust && cargo clean
+
+regen:
+    rm -rf ./lib/src/rust*
+    rm ./rust/src/frb_generated.rs 
+    just maybe-gen
